@@ -119,7 +119,9 @@ build() {
     # cmake_minimum_required(3.5) leaves CMP0091 OLD, which ignores
     # CMAKE_MSVC_RUNTIME_LIBRARY — set it NEW or the CRT stays a DLL.
     # AVX2 + FMA + F16C: every x64 CPU since Haswell (2013).
-    cmake -S "$SRC" -B "$WORK/build" -G "Visual Studio 17 2022" -A x64 "${COMMON_FLAGS[@]}" \
+    # No -G: CMake picks the newest Visual Studio installed (windows-latest
+    # moved past VS 2022, and naming it failed the build).
+    cmake -S "$SRC" -B "$WORK/build" -A x64 "${COMMON_FLAGS[@]}" \
       -DCMAKE_POLICY_DEFAULT_CMP0091=NEW \
       -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
       -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON
