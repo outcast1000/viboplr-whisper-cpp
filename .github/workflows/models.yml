@@ -1,0 +1,64 @@
+name: Publish models
+
+# Copies the ggml models in models.txt from Hugging Face to a release of this
+# repo, because some networks block huggingface.co but not GitHub. Each file is
+# checked against the sha256 Hugging Face records for it (its LFS oid) before it
+# is published, and the release carries a SHA256SUMS the plugin pins from.
+#
+# The release is a prerelease and never "latest": the managed whisper-cli
+# install follows releases/latest, which must stay a binary release. A models
+# release is published once and never changed — publishing a tag that exists
+# fails.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, e.g. models-1
+        type: string
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          [[ "$TAG" =~ ^models-[0-9]+$ ]] || { echo "tag must look like models-1"; exit 1; }
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "$TAG is already published — use the next number"; exit 1
+          fi
+
+      - name: Download and verify
+        run: |
+          mkdir dist
+          curl -fsSL https://huggingface.co/api/models/ggerganov/whisper.cpp/tree/main > tree.json
+          grep -vE '^\s*(#|$)' models.txt | while read -r name; do
+            want="$(jq -r --arg p "$name" '.[] | select(.path == $p) | .lfs.oid // empty' tree.json)"
+            [ -n "$want" ] || { echo "Hugging Face lists no LFS sha256 for $name"; exit 1; }
+            curl -fL --retry 3 -o "dist/$name" "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/$name"
+            got="$(sha256sum "dist/$name" | cut -d' ' -f1)"
+            [ "$got" = "$want" ] || { echo "$name: got $got, Hugging Face says $want"; exit 1; }
+            echo "$name ok ($got)"
+          done
+          (cd dist && sha256sum ggml-*.bin > SHA256SUMS && cat SHA256SUMS)
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --prerelease --latest=false \
+            --title "Models ($TAG)" \
+            --notes "ggml whisper models from https://huggingface.co/ggerganov/whisper.cpp (MIT), each checked against Hugging Face's recorded sha256." \
+            dist/ggml-*.bin dist/SHA256SUMS

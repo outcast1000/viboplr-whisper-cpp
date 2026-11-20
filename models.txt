@@ -1,0 +1,7 @@
+# The ggml models published on the models-<N> release, one file name per line,
+# as named in huggingface.co/ggerganov/whisper.cpp. A published models release
+# is never changed: to add or replace a model, list it here and publish the
+# next models-<N>. The plugin pins each file's sha256 from that release's
+# SHA256SUMS.
+ggml-large-v3-turbo-q5_0.bin
+ggml-small-q5_1.bin

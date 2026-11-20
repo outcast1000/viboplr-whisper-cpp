@@ -1,0 +1,128 @@
+name: Build whisper-cli
+
+# Builds whisper-cli (build.sh, from the pinned sources.txt) for macOS arm64 and
+# Windows x64, checks each one is self-contained, reports the version it was
+# built as and transcribes a sample, and — only when asked — publishes both as a
+# release tagged v<version> with a SHA256SUMS file. That release becomes the
+# repo's "latest", which is where Vibo's managed-tool installer looks.
+#
+# Publishing never overwrites: a tag that exists fails the run. Bump RECIPE_REV
+# (or WHISPER_TAG) in sources.txt for a new build.
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish as release v<version> (never overwrites)
+        type: boolean
+        default: false
+  pull_request:
+
+concurrency:
+  group: build-whisper-cli
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            platform: macos-arm64
+            asset: whisper-cli-macos-arm64
+          - os: windows-latest
+            platform: windows-x64
+            asset: whisper-cli-windows-x64.exe
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      WHISPER_WORK: ${{ github.workspace }}/work
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build
+        run: ./build.sh build
+
+      - name: Depends on nothing but the OS (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          otool -L "work/out/${{ matrix.asset }}"
+          bad="$(otool -L "work/out/${{ matrix.asset }}" | tail -n +2 | awk '{print $1}' | grep -vE '^(/usr/lib/|/System/Library/)' || true)"
+          if [ -n "$bad" ]; then echo "Links outside the OS: $bad"; exit 1; fi
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+
+      - name: Depends on nothing but the OS (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          dumpbin //dependents "work/out/${{ matrix.asset }}" | tee deps.txt
+          bad="$(sed -nE 's/^ +([A-Za-z0-9_.-]+\.dll)$/\1/p' deps.txt | grep -viE '^(kernel32|user32|advapi32|shell32|ole32|oleaut32|ws2_32|bcrypt|ntdll|gdi32|winmm|shlwapi|comdlg32|version|dbghelp|psapi|crypt32|secur32|api-ms-win-.*)\.dll$' || true)"
+          if [ -n "$bad" ]; then echo "Needs DLLs beyond the OS: $bad"; exit 1; fi
+
+      - name: Reports the version it was built as
+        run: |
+          want="$(jq -r .version "work/out/build-info-${{ matrix.platform }}.json")"
+          got="$("work/out/${{ matrix.asset }}" --version)"
+          echo "$got"
+          [ "$got" = "whisper.cpp version: $want" ] || { echo "expected $want"; exit 1; }
+
+      # Smoke test only — the tiny model is fetched here and never published.
+      - name: Transcribes a sample
+        run: |
+          curl -fsSL -o tiny.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin
+          "work/out/${{ matrix.asset }}" -m tiny.bin -f work/src/samples/jfk.wav -ojf -of jfk -np
+          jq -r '.transcription[].text' jfk.json | tee jfk.txt
+          grep -qi "ask not what your country" jfk.txt
+          jq -e '[.transcription[].tokens[] | select(.offsets.from != null)] | length > 0' jfk.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: work/out/*
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Same version on every platform
+        id: ver
+        run: |
+          versions="$(jq -r .version dist/build-info-*.json | sort -u)"
+          [ "$(echo "$versions" | wc -l)" = 1 ] || { echo "Platforms disagree: $versions"; exit 1; }
+          echo "version=$versions" >> "$GITHUB_OUTPUT"
+
+      - name: Publish v${{ steps.ver.outputs.version }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          tag="v$VERSION"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "$tag is already published — bump RECIPE_REV in sources.txt"; exit 1
+          fi
+          cd dist
+          sha256sum whisper-cli-* > SHA256SUMS
+          cat SHA256SUMS
+          commit="$(jq -r .whisperCommit build-info-macos-arm64.json)"
+          wtag="$(jq -r .whisperTag build-info-macos-arm64.json)"
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest \
+            --title "whisper-cli $VERSION" \
+            --notes "whisper.cpp [$wtag](https://github.com/ggml-org/whisper.cpp/tree/$commit), built by $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            whisper-cli-* SHA256SUMS build-info-*.json

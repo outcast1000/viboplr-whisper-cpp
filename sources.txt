@@ -1,0 +1,8 @@
+# The whisper.cpp source every build uses. build.sh clones the tag and refuses
+# to build unless it resolves to exactly this commit.
+WHISPER_TAG=b5907
+WHISPER_COMMIT=5eaee0cc9024eb9e9a99469199920c8b7f5cb9ec
+
+# Bump when the recipe changes but WHISPER_TAG doesn't, so the new build gets a
+# new version (the app announces an update only when the version moves).
+RECIPE_REV=1
